@@ -448,7 +448,9 @@ export function createAirWriteRenderer({
     const rects = engine.state.selectionMode ? drawPanel(ctx, now) : [];
 
     ctx.save();
-    if (stats) {
+    // 窄屏（手机竖屏）底部已经被 DOM 工具栏占住，这行统计会和提示文字叠在一起：
+    // 宽度够才画，比只看 IS_MOBILE 更稳（平板/分屏/窄窗都不重叠）。
+    if (stats && width >= 560) {
       ctx.fillStyle = 'rgba(220, 239, 255, 0.72)';
       ctx.font = `500 ${13 * ratio}px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif`;
       ctx.textAlign = 'left';
