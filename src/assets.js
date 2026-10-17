@@ -72,3 +72,46 @@ export async function resolveWasmPath() {
     ? WASM_PATHS.local
     : WASM_PATHS.cdn;
 }
+
+/**
+ * 把模型文件读进内存，顺带上报进度。
+ *
+ * 为什么要自己下：`modelAssetPath` 交给 MediaPipe 时拿不到任何进度——
+ * 手机上 7.8 MB 的 hand_landmarker.task 加上 9.4 MB wasm，用户只看到一个
+ * 卡住不动的页面，以为坏了。拿到 ArrayBuffer 后还能直接喂
+ * `modelAssetBuffer`，省掉 MediaPipe 再拉一次。
+ *
+ * @param {string} url
+ * @param {(ratio: number, received: number, total: number) => void} [onProgress]
+ * @returns {Promise<Uint8Array>}
+ */
+export async function fetchModelBuffer(url, onProgress) {
+  const res = await fetch(url, { cache: 'force-cache' });
+  if (!res.ok) throw new Error(`模型下载失败（HTTP ${res.status}）：${url}`);
+  const total = Number(res.headers.get('content-length') || 0);
+  if (!res.body || typeof res.body.getReader !== 'function' || !total) {
+    const whole = new Uint8Array(await res.arrayBuffer());
+    onProgress?.(1, whole.byteLength, whole.byteLength);
+    return whole;
+  }
+  const reader = res.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) {
+      chunks.push(value);
+      received += value.byteLength;
+      onProgress?.(Math.min(0.999, received / total), received, total);
+    }
+  }
+  const out = new Uint8Array(received);
+  let at = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  onProgress?.(1, received, total);
+  return out;
+}

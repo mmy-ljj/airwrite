@@ -313,21 +313,33 @@ async function start(source = state.source) {
       await tapToResume(r);
       size = await r.waitForFrames(8000);
     }
-    setStatus('正在加载 MediaPipe 手部模型…');
-    await r.load(({ phase, id }) => {
-      if (phase === 'init') setStatus(`正在加载模型：${id}`);
-    });
+    // 画面先跑起来：模型还在后台加载，预览/画布已经能看，
+    // 用户不会对着一个"卡住不动"的页面（手机上载 17 MB 要好几秒）。
     state.running = true;
     state.started = true;
-    setStatus(`运行中 · ${size.width}×${size.height}`, 'ok');
     hideCards();
     resize();
     r.start();
     acquireWakeLock();
+    setStatus('画面已就绪 · 正在准备手部模型…', 'busy');
+
+    await r.load(({ phase, ratio, delegate }) => {
+      if (phase === 'wasm') setStatus('画面已就绪 · 正在准备识别引擎…', 'busy');
+      else if (phase === 'model' && Number.isFinite(ratio)) {
+        setStatus(`画面已就绪 · 手部模型 ${Math.round(ratio * 100)}%（首次会下载一次）`, 'busy');
+      } else if (phase === 'compile') {
+        setStatus(`画面已就绪 · 正在启用 ${delegate} 推理…`, 'busy');
+      }
+    });
+    setStatus(`运行中 · ${size.width}×${size.height}`, 'ok');
     maybeOpenPanel();
   } catch (err) {
-    state.running = false;
-    state.started = false;
+    // 已经进入"预览已开"的阶段就不再回滚运行状态：画面还在，
+    // 只是模型没起来 —— 让错误卡片说明原因，别把预览也关掉。
+    if (!state.started) {
+      state.running = false;
+      state.started = false;
+    }
     handleError(err);
   } finally {
     state.busy = false;
@@ -343,8 +355,13 @@ function stop() {
   setStatus(IS_MOBILE ? '已暂停 · 点 ▶ 继续' : '已暂停 · 空格继续', '');
 }
 
-/** ?panel=1 直接把手势面板打开：截图与手工查看布局时用。 */
+/** ?panel=1 直接把手势面板打开；?tool=eraser 预选工具（截图/手工查看 2D 橡皮用）。 */
 function maybeOpenPanel() {
+  const tool = params.get('tool');
+  if (tool && ['pen', 'eraser', 'zoom'].includes(tool)) {
+    engine.setTool(tool);
+    syncChips();
+  }
   if (params.get('panel') === '1') engine.openSelection();
 }
 
@@ -805,6 +822,19 @@ globalThis.__airwrite = {
 
 /* --------------------------------------------------------------- 启动 --- */
 
+/**
+ * 把 wasm + 模型缓存起来（见 sw.js）：第二次打开不必再下 17 MB。
+ * 只在 https/localhost 下注册；失败也不影响使用，所以静默忽略。
+ */
+function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) return;
+  if (!/^https?:$/.test(location.protocol)) return;
+  globalThis.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(() => {});
+  });
+}
+
+registerServiceWorker();
 wire();
 wirePointer();
 syncChips();

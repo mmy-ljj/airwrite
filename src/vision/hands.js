@@ -5,7 +5,7 @@
  */
 
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
-import { resolveModel, resolveWasmPath } from '../assets.js';
+import { fetchModelBuffer, resolveModel, resolveWasmPath } from '../assets.js';
 import { OneEuroPointFilter } from './smoothing.js';
 
 /** MediaPipe hand skeleton, as index pairs into the 21 landmarks. */
@@ -85,12 +85,38 @@ export function createHandsTracker({
       return activeDelegate;
     },
 
-    async init() {
+    /** 模型是否已经加载完成（rig 用它决定要不要跳过 detect）。 */
+    isReady() {
+      return !!landmarker;
+    },
+
+    /**
+     * 载入 wasm + 模型。
+     *
+     * `onProgress` 会被用来更新界面：手机上这一步要下 ~17 MB 并编译 wasm，
+     * 不给进度用户只会看到"卡住了"。模型先在 JS 里读成 buffer，既能报百分比，
+     * 也省掉 MediaPipe 内部再请求一次。
+     */
+    async init(_rig, onProgress = () => {}) {
+      onProgress({ phase: 'wasm' });
       const wasmPath = await resolveWasmPath();
       const vision = await FilesetResolver.forVisionTasks(wasmPath);
       const { url } = await resolveModel('hand_landmarker');
+      let buffer = null;
+      try {
+        buffer = await fetchModelBuffer(url, (ratio, received, total) => {
+          onProgress({ phase: 'model', ratio, received, total });
+        });
+      } catch (err) {
+        // 下载拿不到进度也不能挡住使用：退回让 MediaPipe 自己按 URL 拉。
+        console.warn('[hands] model prefetch failed, falling back to modelAssetPath', err);
+        buffer = null;
+      }
       const build = (device) => ({
-        baseOptions: { modelAssetPath: url, delegate: device },
+        baseOptions: {
+          ...(buffer ? { modelAssetBuffer: buffer.slice() } : { modelAssetPath: url }),
+          delegate: device,
+        },
         runningMode: 'VIDEO',
         numHands,
         minHandDetectionConfidence: minDetectionConfidence,
@@ -102,8 +128,10 @@ export function createHandsTracker({
       let lastErr = null;
       for (const device of order) {
         try {
+          onProgress({ phase: 'compile', delegate: device });
           landmarker = await HandLandmarker.createFromOptions(vision, build(device));
           activeDelegate = device;
+          onProgress({ phase: 'ready', delegate: device, bytes: buffer?.byteLength || 0 });
           return;
         } catch (err) {
           lastErr = err;

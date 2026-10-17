@@ -224,11 +224,16 @@ export class Rig {
     });
   }
 
-  /** Initialise every registered tracker (loads wasm + models). */
+  /**
+   * Initialise every registered tracker (loads wasm + models).
+   *
+   * 每个 tracker 的进度通过 onProgress 透传（`{phase, id, ratio, ...}`），
+   * UI 靠它显示「模型 xx%」——手机上下 17 MB 不显示进度就像卡死。
+   */
   async load(onProgress = () => {}) {
     for (const tracker of this.#trackers.values()) {
       onProgress({ phase: 'init', id: tracker.id });
-      await tracker.init(this);
+      await tracker.init(this, (info = {}) => onProgress({ ...info, id: tracker.id }));
     }
     onProgress({ phase: 'ready' });
   }
@@ -321,6 +326,12 @@ export class Rig {
 
     const raw = {};
     for (const tracker of this.#trackers.values()) {
+      // 模型还没就绪时不要调用 detect：一边放预览一边载模型，画面先出来，
+      // 手部追踪晚几百毫秒接上（以前是载完模型才出画面，手机以为卡死）。
+      if (typeof tracker.isReady === 'function' && !tracker.isReady()) {
+        raw[tracker.id] = null;
+        continue;
+      }
       try {
         raw[tracker.id] = tracker.detect(video, ts);
       } catch (err) {

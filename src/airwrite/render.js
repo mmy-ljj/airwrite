@@ -12,6 +12,7 @@
 
 import { ViewMapper } from '../render/mapper.js';
 import { glow, neonLine, roundRect, withAlpha } from '../render/draw.js';
+import { drawEraserCursor, drawEraserModel } from './eraser-model.js';
 
 /** 画布上的面板配色（与 styles.css 的霓虹暗色系一致）。 */
 const PANEL = {
@@ -281,16 +282,31 @@ export function createAirWriteRenderer({
     const cursor = state.cursor;
     if (!cursor.active) return;
     const screen = mapper.point(cursor);
-    const base = (state.tool === 'eraser' ? 22 : 12) * ratio;
-    const color = state.tool === 'eraser' ? '#ff8a5c' : state.color || PANEL.accent;
+    const eraser = state.tool === 'eraser';
+    const base = (eraser ? 22 : 12) * ratio;
+    const color = eraser ? '#ff8a5c' : state.color || PANEL.accent;
     const pinched = cursor.pinch <= (engine.config?.pinchStart ?? 0.42);
-    glow(context, screen.x, screen.y, base * 1.7, color, 0.5);
+    glow(context, screen.x, screen.y, base * 1.7, color, eraser ? 0.28 : 0.5);
     context.save();
-    context.strokeStyle = color;
-    context.lineWidth = 2 * ratio;
-    context.beginPath();
-    context.arc(screen.x, screen.y, pinched ? base * 0.55 : base, 0, Math.PI * 2);
-    context.stroke();
+    if (eraser) {
+      // 橡皮擦用 2D 模型当光标（src/airwrite/eraser-model.js），
+      // 虚线圆=实际擦除半径，橡皮的擦除端贴在指尖上。
+      const radius = Math.max(10, state.eraserSize || 26) * ratio;
+      drawEraserCursor(context, {
+        x: screen.x,
+        y: screen.y,
+        size: Math.min(104 * ratio, Math.max(30 * ratio, radius * 2.2)),
+        radius: radius * 0.96,
+        press: pinched ? 1 : 0,
+        ratio,
+      });
+    } else {
+      context.strokeStyle = color;
+      context.lineWidth = 2 * ratio;
+      context.beginPath();
+      context.arc(screen.x, screen.y, pinched ? base * 0.55 : base, 0, Math.PI * 2);
+      context.stroke();
+    }
     const hit = engine.selection?.hit;
     if (hit) {
       const p = Math.max(0, Math.min(1, hit.progress || 0));
@@ -364,11 +380,31 @@ export function createAirWriteRenderer({
         context.lineWidth = 1.5 * css;
         context.stroke();
       } else if (item.kind === 'size') {
-        const r = Math.max(2 * css, ((item.value?.size || 6) / 2) * 1.4 * css);
+        // 笔尖/橡皮的直径预览：按格子高度夹一下，40px 的橡皮也不会撑破格子
+        const r = Math.max(2 * css, Math.min(rect.h * css * 0.34, ((item.value?.size || 6) / 2) * 1.4 * css));
         context.beginPath();
         context.arc(cx, cy, r, 0, Math.PI * 2);
         context.fillStyle = active ? '#081020' : PANEL.text;
         context.fill();
+      } else if (item.value?.tool === 'eraser') {
+        // 工具格里的橡皮擦：画同一块 2D 橡皮；格子够高就在下面补一行小字
+        const cellH = rect.h / css;
+        const withLabel = cellH >= 44;
+        const iconSize = Math.min(rect.w * 0.5, (withLabel ? cellH * 0.34 : cellH * 0.62)) * css;
+        drawEraserModel(context, {
+          x: cx - iconSize * 0.3,
+          y: cy - (withLabel ? cellH * css * 0.22 : 0),
+          size: iconSize,
+          angle: -0.38,
+          alpha: 1,
+        });
+        if (withLabel) {
+          context.fillStyle = active ? '#081020' : PANEL.text;
+          context.font = `600 ${Math.max(11, Math.min(14, cellH * 0.3)) * css}px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif`;
+          context.textAlign = 'center';
+          context.textBaseline = 'middle';
+          context.fillText(item.label || item.id, cx, cy + cellH * css * 0.34);
+        }
       } else {
         context.fillStyle = active ? '#081020' : PANEL.text;
         context.font = `600 ${Math.max(11, Math.min(16, rect.h * 0.4)) * css}px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif`;
