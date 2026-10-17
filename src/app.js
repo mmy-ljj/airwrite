@@ -106,6 +106,8 @@ function resize() {
   if (width === viewport.width && height === viewport.height) return false;
   viewport = { width, height };
   renderer.resize({ width, height });
+  // 旋转/分屏后可用宽度变了，状态文字要按新宽度重新取舍。
+  if (lastStatus) setStatus(lastStatus.text, lastStatus.kind);
   return true;
 }
 
@@ -172,15 +174,19 @@ function syncChips() {
 /**
  * 手机顶栏放不下长状态（390 宽实测被截成「演示模式 · 合」）：
  * 窄屏只保留第一段，完整信息仍在卡片和底部提示里。
+ * 按宽度判定而不是按设备判定 —— 分屏/窄窗/iframe 里也一样需要。
  */
 function fitStatusText(text) {
   const raw = String(text ?? '');
   const width = viewport.width || window.innerWidth || 0;
-  if (!IS_MOBILE || width >= 560) return raw;
+  if (width >= 560) return raw;
   return raw.split(' · ')[0] || raw;
 }
 
+let lastStatus = null;
+
 function setStatus(text, kind = 'busy') {
+  lastStatus = { text, kind };
   dom.statusText.textContent = fitStatusText(text);
   dom.statusDot.dataset.kind = kind;
 }
