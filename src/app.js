@@ -169,8 +169,19 @@ function syncChips() {
   dom.chipSize.textContent = String(tool === 'eraser' ? engine.state.eraserSize : engine.state.size);
 }
 
+/**
+ * 手机顶栏放不下长状态（390 宽实测被截成「演示模式 · 合」）：
+ * 窄屏只保留第一段，完整信息仍在卡片和底部提示里。
+ */
+function fitStatusText(text) {
+  const raw = String(text ?? '');
+  const width = viewport.width || window.innerWidth || 0;
+  if (!IS_MOBILE || width >= 560) return raw;
+  return raw.split(' · ')[0] || raw;
+}
+
 function setStatus(text, kind = 'busy') {
-  dom.statusText.textContent = text;
+  dom.statusText.textContent = fitStatusText(text);
   dom.statusDot.dataset.kind = kind;
 }
 
