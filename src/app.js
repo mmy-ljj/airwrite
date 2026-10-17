@@ -81,6 +81,17 @@ const IS_IOS =
   /iPad|iPhone|iPod/.test(navigator.userAgent || '') ||
   (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
 
+// 自检模式（?qa=1）必须是可复现的：上次手工选过的工具/颜色/粗细会存在
+// localStorage 里，不清掉就会让"缩放初始为 1""画布上真的画出了东西"这类
+// 断言随上一次会话飘（曾经在复用 Edge profile 的 QA 里莫名失败）。
+if (params.get('qa') === '1') {
+  try {
+    localStorage.removeItem('airwrite.style');
+  } catch {
+    /* 隐私模式下 localStorage 可能不可用 */
+  }
+}
+
 const engine = createAirWriteEngine({ recognizer: createRecognizer() });
 const mapper = new ViewMapper();
 const renderer = createAirWriteRenderer({
