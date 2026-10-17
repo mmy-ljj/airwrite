@@ -484,11 +484,18 @@ export function createAirWriteEngine(options = {}) {
   function ensurePanel() {
     /* 缓存的签名必须带上 tool：选中橡皮擦后，大小那一行要换成橡皮宽度档
        （26/40），否则面板永远只能改笔宽。改成 'both' 一类的混合布局会把
-       橡皮格子当成笔宽写进 state.size，所以这里按当前工具取布局。 */
-    const sig = `${aspect.toFixed(3)}|${state.tool}`;
+       橡皮格子当成笔宽写进 state.size，所以这里按当前工具取布局。
+       还要带上画布像素尺寸：手机竖屏下几何按像素算行高（见 panel-layout.js
+       的 portraitPx 分支），尺寸变了必须重算。 */
+    const sig = `${aspect.toFixed(3)}|${state.tool}|${canvasSize.x}x${canvasSize.y}`;
     if (sig !== panelSig) {
       panelSig = sig;
-      panel = layoutPanel({ aspect, tool: state.tool });
+      panel = layoutPanel({
+        aspect,
+        tool: state.tool,
+        width: canvasSize.x,
+        height: canvasSize.y,
+      });
     }
     return panel;
   }

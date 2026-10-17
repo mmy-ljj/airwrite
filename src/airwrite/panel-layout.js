@@ -81,7 +81,11 @@ function normalizeOptions(opts) {
   if (!Number.isFinite(cols) || cols <= 0) cols = 3;
   cols = Math.min(COLS_MAX, Math.max(COLS_MIN, cols));
 
-  return { aspect, cols, actions: !!o.actions, tool: normalizeTool(o.tool) };
+  // 画布像素尺寸（可选）：只为竖屏（手机）分支服务，缺省 0 = 走旧算法
+  const width = Number(o.width) > 0 ? Number(o.width) : 0;
+  const height = Number(o.height) > 0 ? Number(o.height) : 0;
+
+  return { aspect, cols, actions: !!o.actions, tool: normalizeTool(o.tool), width, height };
 }
 
 /** tool 归一化：'eraser' / 'both' 原样保留，其余（含 'zoom'、非法值）都当 'pen'。 */
@@ -177,7 +181,7 @@ function actionItems() {
  *   x/y/w/h 归一化 0..1（x/w 相对宽，y/h 相对高），且 x+w <= 1、y+h <= 1。
  */
 export function layoutPanel(opts) {
-  const { aspect, cols, actions, tool } = normalizeOptions(opts);
+  const { aspect, cols, actions, tool, width, height } = normalizeOptions(opts);
 
   // 三行（+ 可选 action 行）。每行声明自己的网格列数。
   const tools = toolItems();
@@ -195,23 +199,74 @@ export function layoutPanel(opts) {
   for (const g of groups) rows += Math.max(1, Math.ceil(g.items.length / g.columns));
   if (rows < 1) rows = 1;
 
-  // 纵向：先按目标面板高推行高，再反推真实面板高（保证内部自洽）
-  const innerW = PANEL_W - 2 * PAD;
-  const targetInnerH = PANEL_H - 2 * PAD;
-  const rawRowH = (targetInnerH - (rows - 1) * GAP_Y) / rows;
-  const rowH = Math.max(MIN_ROW_H, rawRowH);
-  const panelH = 2 * PAD + rows * rowH + (rows - 1) * GAP_Y; // x 单位
-  const panelH_y = panelH * aspect;
+  /* 几何：横屏沿用「以宽度为基准」的旧算法；竖屏（手机）改成按像素给行高。
+     手机竖屏 390x844 时 aspect=0.46，旧算法把面板高算成 0.17*390 ≈ 66px，
+     每行只有 16px —— 手指根本点不中（回归见 tools/test_engine.mjs 第 9 节）。 */
+  let x;
+  let y;
+  let w;
+  let h;
+  let innerX;
+  let innerW;
+  let gapX;
+  let rowH_y;
+  let gapY_y;
+  let padY_y;
 
-  const x = round6(PANEL_X);
-  const y = round6(PANEL_BOTTOM - panelH_y);
-  const w = round6(PANEL_W);
-  const h = round6(panelH_y);
+  const portraitPx = width > 0 && height > 0 && aspect < 0.95;
+  /* 画布底部压着工具栏与提示行（DOM）：面板底边必须留在它们上面，否则窄屏/横屏
+     手机上"笔迹 0 · 字 0"会盖住面板最下面一行（844x390 实测会重叠）。按像素预留。 */
+  const bottomReservePx = portraitPx ? 84 : 64;
+  if (portraitPx) {
+    const marginX = 12;
+    const marginBottom = bottomReservePx;
+    const padPx = 9;
+    const gapPx = 8;
+    const maxPanelPx = height * 0.66;
+    let rowHpx = 54; // 一行 54px：手指悬停/点选都点得中
+    if (2 * padPx + rows * rowHpx + (rows - 1) * gapPx > maxPanelPx) {
+      rowHpx = Math.max(38, (maxPanelPx - 2 * padPx - (rows - 1) * gapPx) / rows);
+    }
+    const panelWPx = Math.min(width - 2 * marginX, 560);
+    const panelHPx = 2 * padPx + rows * rowHpx + (rows - 1) * gapPx;
+    const panelXPx = (width - panelWPx) / 2;
+    const panelYPx = Math.max(0, height - marginBottom - panelHPx);
 
-  const innerX = PANEL_X + PAD;
-  const rowH_y = rowH * aspect;
-  const gapY_y = GAP_Y * aspect;
-  const padY_y = PAD * aspect;
+    x = round6(panelXPx / width);
+    y = round6(panelYPx / height);
+    w = round6(panelWPx / width);
+    h = round6(panelHPx / height);
+    gapX = gapPx / width;
+    innerX = x + padPx / width;
+    innerW = w - 2 * (padPx / width);
+    rowH_y = rowHpx / height;
+    gapY_y = gapPx / height;
+    padY_y = padPx / height;
+  } else {
+    // 纵向：先按目标面板高推行高，再反推真实面板高（保证内部自洽）
+    const targetInnerH = PANEL_H - 2 * PAD;
+    const rawRowH = (targetInnerH - (rows - 1) * GAP_Y) / rows;
+    const rowH = Math.max(MIN_ROW_H, rawRowH);
+    const panelH = 2 * PAD + rows * rowH + (rows - 1) * GAP_Y; // x 单位
+    const panelH_y = panelH * aspect;
+
+    x = round6(PANEL_X);
+    y = round6(PANEL_BOTTOM - panelH_y);
+    w = round6(PANEL_W);
+    h = round6(panelH_y);
+    gapX = GAP_X;
+    innerX = PANEL_X + PAD;
+    innerW = PANEL_W - 2 * PAD;
+    rowH_y = rowH * aspect;
+    gapY_y = GAP_Y * aspect;
+    padY_y = PAD * aspect;
+  }
+
+  // 统一把面板抬到底部预留区之上（横屏手机这类"矮"视口靠这一条救回来）
+  if (width > 0 && height > 0) {
+    const maxBottomNorm = Math.max(0, (height - bottomReservePx) / height);
+    if (y + h > maxBottomNorm) y = round6(Math.max(0, maxBottomNorm - h));
+  }
 
   const items = [];
   let rowIndex = 0;
@@ -220,18 +275,18 @@ export function layoutPanel(opts) {
     const columns = Math.max(1, g.columns);
     const n = g.items.length;
     const subRows = Math.max(1, Math.ceil(n / columns));
-    const cellW = (innerW - (columns - 1) * GAP_X) / columns;
+    const cellW = (innerW - (columns - 1) * gapX) / columns;
 
     for (let r = 0; r < subRows; r++) {
       const slice = g.items.slice(r * columns, r * columns + columns);
       const count = slice.length;
       if (count === 0) continue;
-      const groupW = count * cellW + (count - 1) * GAP_X;
+      const groupW = count * cellW + (count - 1) * gapX;
       const startX = innerX + (innerW - groupW) / 2; // 条目组在本行内居中
       const itemY = y + padY_y + rowIndex * (rowH_y + gapY_y);
 
       slice.forEach((def, i) => {
-        const ix = round6(startX + i * (cellW + GAP_X));
+        const ix = round6(startX + i * (cellW + gapX));
         const iw = round6(cellW);
         const iy = round6(itemY);
         const ih = round6(rowH_y);
