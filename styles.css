@@ -1,0 +1,481 @@
+/* 隔空写字 AirWrite — 极简深色界面：画面是主角，控件全部飘在玻璃层上。
+   ------------------------------------------------------------------------
+   层次： #camera(1) → #ink(2, 已写完的笔迹) → #overlay(3, 活动内容 + 手势面板)
+          → .bar / .card(5, 交互层)
+   注意：overlay 必须接收指针事件（鼠标也能写字、点面板），所以它不能像
+   ink 那样设 pointer-events:none。 */
+
+:root {
+  --bg: #05070d;
+  --text: #eaf1ff;
+  --muted: #8d9cc0;
+  --accent: #6ee7ff;
+  --accent-2: #b98bff;
+  --ok: #63e6a8;
+  --busy: #ffd166;
+  --err: #ff6b8a;
+  --glass: rgba(9, 14, 25, 0.55);
+  --glass-strong: rgba(9, 14, 25, 0.82);
+  --line: rgba(140, 172, 228, 0.16);
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --safe-top: max(14px, env(safe-area-inset-top));
+  --safe-bottom: max(14px, env(safe-area-inset-bottom));
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ---------------------------------------------------------------- stage --- */
+
+.stage {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+  background: radial-gradient(120% 90% at 30% 12%, #101b30 0%, #070b15 55%, #04060c 100%);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.stage video,
+.stage canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+#camera { z-index: 1; }
+
+/* 已经写完的笔迹：静态缓存层，不接事件 */
+#ink { z-index: 2; pointer-events: none; }
+
+/* 活动层：活笔、雪花、光标、画布上的手势面板 —— 要收鼠标事件 */
+#overlay { z-index: 3; pointer-events: auto; touch-action: none; cursor: crosshair; }
+body.selecting #overlay { cursor: pointer; }
+
+/* 镜像把摄像头与两层画布一起翻转，渲染层就能一直在"未翻转"的视频坐标里工作 */
+/* 镜像只翻转摄像头画面本身。画布一律不翻转——画布上还要写中文（工具名、提示），
+   被 scaleX(-1) 一翻就全成了镜像字；用户手的镜像由 JS 在数据层做（mirrorHands）。 */
+.stage.mirror #camera { transform: scaleX(-1); }
+
+/* 演示模式：没有摄像头画面，用一层柔光当背景 */
+.stage.demo #camera { opacity: 0; }
+.stage.demo {
+  background:
+    radial-gradient(90% 70% at 50% 100%, rgba(110, 231, 255, 0.10) 0%, transparent 60%),
+    radial-gradient(120% 90% at 30% 12%, #101b30 0%, #070b15 55%, #04060c 100%);
+}
+
+/* ------------------------------------------------------------------ bar --- */
+
+.bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 var(--safe-top);
+  pointer-events: none;
+}
+
+.bar > * { pointer-events: auto; }
+
+.bar.top {
+  top: var(--safe-top);
+  justify-content: space-between;
+}
+
+.bar.bottom {
+  bottom: var(--safe-bottom);
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  transition: opacity 320ms var(--ease), transform 320ms var(--ease);
+}
+
+body.selecting .bar.bottom { opacity: 0; transform: translateY(10px); pointer-events: none; }
+
+/* 品牌 */
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 13px 7px 11px;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+  /* 窄屏挤压时先让状态文字省略，而不是把品牌名挤成两行 */
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.brand .mark {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: linear-gradient(140deg, var(--accent), var(--accent-2));
+  box-shadow: 0 0 12px rgba(110, 231, 255, 0.85);
+}
+.brand .name { font-size: 13.5px; letter-spacing: 0.6px; }
+.brand .tag {
+  font-size: 10px;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--muted);
+  border-left: 1px solid var(--line);
+  padding-left: 9px;
+}
+
+/* 状态 */
+.status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-inline: auto 4px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 42vw;
+  /* 可以被压缩（配合 overflow:hidden 出省略号），但不会被压到 0 */
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.status .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--busy);
+  box-shadow: 0 0 10px currentColor;
+  flex: none;
+}
+.status .dot[data-kind="ok"] { background: var(--ok); }
+.status .dot[data-kind="busy"] { background: var(--busy); animation: pulse 1.15s infinite ease-in-out; }
+.status .dot[data-kind="err"] { background: var(--err); }
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+/* 图标按钮 */
+.actions { display: flex; align-items: center; gap: 8px; }
+
+.icon {
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--glass);
+  color: var(--text);
+  cursor: pointer;
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.32);
+  transition: background 200ms var(--ease), border-color 200ms var(--ease),
+    transform 200ms var(--ease), color 200ms var(--ease), opacity 200ms var(--ease);
+}
+.icon svg {
+  width: 19px;
+  height: 19px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon svg .ico-play { fill: currentColor; stroke: none; }
+.icon:hover { background: rgba(22, 32, 54, 0.72); border-color: rgba(150, 190, 255, 0.34); transform: translateY(-1px); }
+.icon:active { transform: translateY(0) scale(0.97); }
+.icon:focus-visible { outline: 2px solid rgba(110, 231, 255, 0.65); outline-offset: 2px; }
+.icon.on { border-color: rgba(110, 231, 255, 0.42); background: rgba(110, 231, 255, 0.14); }
+.icon[disabled] { opacity: 0.35; cursor: default; transform: none; }
+
+/* 全屏图标两态：默认"放大"，进入全屏后换成"缩小" */
+.icon .ico-shrink { display: none; }
+body.full .icon .ico-expand { display: none; }
+body.full .icon .ico-shrink { display: block; }
+
+/* 底部统计与提示 */
+.chips { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--glass);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  white-space: nowrap;
+}
+.chip b { color: var(--text); font-weight: 600; }
+.chip.mono { font-family: "Cascadia Mono", ui-monospace, Consolas, monospace; font-size: 11.5px; }
+.chip.color i {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.5) inset;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(6, 10, 20, 0.42);
+  border: 1px solid rgba(140, 172, 228, 0.1);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* ----------------------------------------------------------------- card --- */
+
+.card {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 6;
+  width: min(430px, calc(100vw - 36px));
+  padding: 24px 24px 20px;
+  border-radius: 22px;
+  background: var(--glass-strong);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(26px) saturate(150%);
+  -webkit-backdrop-filter: blur(26px) saturate(150%);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  transform: translate(-50%, -50%);
+  animation: cardIn 520ms var(--ease) both;
+}
+
+@keyframes cardIn {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 14px)) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+.card h1 {
+  margin: 0 0 10px;
+  font-size: 22px;
+  letter-spacing: 0.4px;
+  background: linear-gradient(100deg, var(--accent), var(--accent-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.card .lead { margin: 0 0 18px; font-size: 13px; color: #c2cee8; line-height: 1.65; }
+.card .fine { margin: 14px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+.card code {
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.card-actions { display: grid; gap: 9px; }
+
+.card button {
+  padding: 11px 16px;
+  border-radius: 13px;
+  border: 1px solid var(--line);
+  background: rgba(22, 30, 50, 0.72);
+  color: var(--text);
+  font: inherit;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: background 200ms var(--ease), border-color 200ms var(--ease), transform 160ms var(--ease);
+}
+.card button:hover { background: rgba(34, 46, 74, 0.86); border-color: rgba(150, 190, 255, 0.32); transform: translateY(-1px); }
+.card button:active { transform: translateY(0) scale(0.99); }
+.card button.primary {
+  background: linear-gradient(120deg, rgba(110, 231, 255, 0.9), rgba(185, 139, 255, 0.88));
+  border-color: transparent;
+  color: #05121c;
+  font-weight: 600;
+  box-shadow: 0 12px 34px rgba(110, 231, 255, 0.28);
+}
+.card button.primary:hover { filter: brightness(1.06); }
+
+.gestures { margin: 0 0 18px; padding: 0; list-style: none; display: grid; gap: 9px; }
+.gestures li { display: grid; grid-template-columns: 84px 1fr; gap: 10px; font-size: 12.5px; }
+.gestures b {
+  color: var(--accent);
+  font-weight: 600;
+  padding-top: 1px;
+}
+.gestures span { color: #c2cee8; line-height: 1.55; }
+
+.card.error { border-color: rgba(255, 107, 138, 0.36); }
+.card.error h1 { background: linear-gradient(100deg, #ff9fb4, #ffd0a8); -webkit-background-clip: text; background-clip: text; }
+.card pre {
+  margin: 0 0 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #ffd7e0;
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 140px;
+  overflow: auto;
+}
+
+/* 脚本错误日志（正常时 hidden） */
+#out {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 9;
+  max-height: 34vh;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(28, 8, 14, 0.88);
+  border: 1px solid rgba(255, 107, 138, 0.4);
+  color: #ffd7e0;
+  font-family: "Cascadia Mono", ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+/* --------------------------------------------------------------- mobile --- */
+
+@media (max-width: 760px) {
+  .brand .tag { display: none; }
+  .status { max-width: 34vw; font-size: 11.5px; }
+  .icon { width: 36px; height: 36px; border-radius: 11px; }
+  .actions { gap: 6px; }
+  .bar.bottom { align-items: center; }
+  .hint { text-align: center; font-size: 11.5px; }
+  .card { padding: 20px; border-radius: 20px; }
+  .card h1 { font-size: 19px; }
+}
+
+/* 手机竖屏：顶部只留品牌 + 图标，状态文字压缩到最短，避免横向溢出
+   （画布上画的面板是归一化的，会自己适配，不需要 CSS 参与）。 */
+@media (max-width: 560px) {
+  .bar.top { gap: 8px; }
+  .brand { padding: 6px 10px; gap: 7px; }
+  .brand .name { font-size: 12.5px; letter-spacing: 0.4px; }
+  .status { max-width: 30vw; font-size: 11px; gap: 6px; }
+  .icon { width: 34px; height: 34px; border-radius: 10px; }
+  .actions { gap: 5px; }
+  .chip { font-size: 11px; padding: 4px 8px; }
+  .hint { font-size: 11px; }
+}
+
+/* ------------------------------------------------- 触屏 / 手机浏览器细节 --- */
+
+/* 说明卡里的快捷键在手机上没意义，触屏小贴士反过来只在手机上显示 */
+.touch-only { display: none; }
+body.touch .touch-only { display: block; }
+body.touch .keys { display: none; }
+
+/* 手机的 100% 高度会随地址栏收放跳动：支持 dvh 就用动态视口高度 */
+@supports (height: 100dvh) {
+  html, body { height: 100dvh; }
+}
+
+html, body {
+  overscroll-behavior: none;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 手指点按钮要"一碰就有反应"：去掉双击缩放延迟 */
+.card button,
+.icon {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* 说明卡在小屏 / 横屏手机上要能滚动，否则超出屏幕的部分点不到 */
+.card {
+  max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 横屏手机高度很扁（≈390px）：把浮层收窄，给画面留空间 */
+@media (orientation: landscape) and (max-height: 480px) {
+  .bar.top { top: max(8px, env(safe-area-inset-top)); }
+  .bar.bottom { bottom: max(8px, env(safe-area-inset-bottom)); gap: 5px; }
+  .brand { padding: 5px 9px; }
+  .brand .name { font-size: 12px; }
+  .hint { display: none; }
+  .chip { font-size: 10.5px; padding: 3px 7px; }
+  .card { padding: 16px 18px; width: min(420px, calc(100vw - 24px)); }
+  .card h1 { font-size: 18px; margin-bottom: 6px; }
+  .card .lead { margin-bottom: 12px; font-size: 12px; }
+  .card .fine { margin-top: 10px; font-size: 11px; }
+  .gestures { gap: 6px; margin-bottom: 12px; }
+  .gestures li { font-size: 12px; }
+}
+
+/* 超窄屏（真手机竖屏）：镜像开关让位（手机上默认就用镜像预览），图标再小一档。
+   去掉镜像后 430px 宽也放得下：品牌 ~104 + 状态 ≤26vw + 4 个图标 32px。 */
+@media (max-width: 480px) {
+  .icon.optional { display: none; }
+  .icon { width: 32px; height: 32px; border-radius: 9px; }
+  .status { max-width: 26vw; }
+  .brand .name { font-size: 12px; }
+}
+
+/* 极窄屏（320-360px 的老手机 / 分屏）：状态压到一行省略号，别把图标挤掉 */
+@media (max-width: 380px) {
+  .status { max-width: 22vw; }
+  .brand .tag { display: none; }
+  .chip { font-size: 10.5px; }
+}
+
+/* 触屏设备的点击目标放大：32px 图标在手机上偏小，靠右的按钮很容易点空。
+   必须放在上面所有按宽度缩小的断点之后（同优先级，后者胜出）。 */
+@media (pointer: coarse) {
+  .icon { width: 36px; height: 36px; border-radius: 11px; }
+  .icon svg { width: 20px; height: 20px; }
+  .card button { padding: 13px 16px; font-size: 14px; }
+}
+
+/* 窄屏 + 触屏：状态已经让不出宽度，图标收回到 34px，保证一行放得下 */
+@media (pointer: coarse) and (max-width: 420px) {
+  .icon { width: 34px; height: 34px; border-radius: 10px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+}

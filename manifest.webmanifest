@@ -1,0 +1,16 @@
+{
+  "name": "隔空写字 AirWrite",
+  "short_name": "隔空写字",
+  "description": "对着摄像头用食指在空气里写字：捏合落笔、张开手掌换工具、手背向右横扫让字迹像雪花飘散。",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#05070d",
+  "theme_color": "#05070d",
+  "icons": [
+    { "src": "./icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

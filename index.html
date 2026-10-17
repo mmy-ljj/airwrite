@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05070d" />
+<meta name="color-scheme" content="dark" />
+<meta name="description" content="隔空写字 AirWrite：对着摄像头用食指在空气里写字，捏合落笔、张开手掌换工具、手背向右横扫让字迹像雪花一样飘散。手机浏览器也能用。" />
+<!-- 手机体验：状态栏融进深色画布，支持「添加到主屏幕」后全屏打开 -->
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="隔空写字" />
+<meta name="format-detection" content="telephone=no,email=no,address=no" />
+<title>隔空写字 · AirWrite</title>
+<!-- 标签页图标：内联 SVG（没有额外请求，也不会出现 /favicon.ico 404） -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236ee7ff'/%3E%3Cstop offset='1' stop-color='%23a78bfa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='%230b1020'/%3E%3Cpath d='M8 24 L20 12' stroke='url(%23g)' stroke-width='3.2' stroke-linecap='round'/%3E%3Ccircle cx='23' cy='9' r='4.2' fill='%236ee7ff'/%3E%3C/svg%3E" />
+<!-- iOS「添加到主屏幕」只认 PNG，用 tools/make_icon.py 生成（和上面的 SVG 同一套设计） -->
+<link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
+<link rel="icon" type="image/png" sizes="180x180" href="./icon-180.png" />
+<link rel="manifest" href="./manifest.webmanifest" />
+<link rel="stylesheet" href="./styles.css" />
+<!--
+  MediaPipe 以裸模块名导入，在这里解析：
+
+    - ./vendor/lib/vision_bundle.mjs 随仓库一起交付，断网也能跑
+    - 想换成 CDN，把下面的目标替换成
+      https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs
+
+  浏览器只在 http(s) 下允许访问摄像头（file:// 会被拒绝）：
+  本机开发用 `python serve.py` 打开 http://127.0.0.1:8000/；
+  手机上直接用部署好的 https 地址（GitHub Pages）打开。
+-->
+<script type="importmap">
+{
+  "imports": {
+    "@mediapipe/tasks-vision": "./vendor/lib/vision_bundle.mjs"
+  }
+}
+</script>
+</head>
+<body>
+  <main id="stage" class="stage mirror">
+    <!-- 摄像头预览 + 两层画布：ink 缓存"已经写完的笔迹"，overlay 画每帧的活动内容 -->
+    <video id="camera" playsinline muted autoplay></video>
+    <canvas id="ink" class="layer"></canvas>
+    <canvas id="overlay" class="layer"></canvas>
+
+    <!-- 顶栏：品牌 · 状态 · 操作 -->
+    <header class="bar top">
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <span class="name">隔空写字</span>
+        <span class="tag">AirWrite</span>
+      </div>
+      <div class="status" id="status">
+        <i class="dot" id="status-dot" data-kind="busy"></i>
+        <span id="status-text">正在初始化…</span>
+      </div>
+      <nav class="actions" aria-label="操作">
+        <button id="btn-start" class="icon" type="button" title="开始 / 暂停（空格）" aria-label="开始或暂停">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="ico-play" d="M8 5.5v13l11-6.5z" /></svg>
+        </button>
+        <button id="btn-undo" class="icon" type="button" title="撤销上一笔（Z）" aria-label="撤销">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7H5v-4" /><path d="M5.2 7.2a8 8 0 1 1-1.1 7.6" /></svg>
+        </button>
+        <button id="btn-clear" class="icon" type="button" title="清空（X）" aria-label="清空">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h14" /><path d="M9 7V5h6v2" /><path d="M7 7l1 12h8l1-12" /></svg>
+        </button>
+        <button id="btn-mirror" class="icon on optional" type="button" title="镜像预览（M）" aria-label="镜像预览">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v16" /><path d="M9 8L4 12l5 4z" /><path d="M15 8l5 4-5 4z" /></svg>
+        </button>
+        <button id="btn-full" class="icon" type="button" title="全屏（F）" aria-label="全屏">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path class="ico-expand" d="M4 9V4h5M20 15v5h-5M20 9V4h-5M4 15v5h5" /><path class="ico-shrink" d="M9 4v5H4M15 20v-5h5M15 4v5h5M9 20v-5H4" /></svg>
+        </button>
+        <button id="btn-help" class="icon" type="button" title="手势说明（H）" aria-label="手势说明">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 9a2.6 2.6 0 1 1 3.4 2.5c-.7.3-1 .9-1 1.7v.4" /><circle cx="12" cy="17.6" r="0.9" fill="currentColor" stroke="none" /></svg>
+        </button>
+      </nav>
+    </header>
+
+    <!-- 底栏：统计 + 一句提示（面板打开时淡出，让位给画布上的手势面板） -->
+    <footer class="bar bottom">
+      <div class="chips">
+        <span class="chip"><b id="chip-tool">笔</b></span>
+        <span class="chip color"><i id="chip-color"></i><span id="chip-color-name">#6ee7ff</span></span>
+        <span class="chip"><span id="chip-size">10</span> px</span>
+        <span class="chip mono" id="chip-stats">笔迹 0 · 字 0</span>
+        <span class="chip mono" id="chip-fps">-- FPS</span>
+      </div>
+      <p class="hint" id="hint">张开手掌 → 选工具 · 食指悬停选择 · 再次张开手掌退出</p>
+    </footer>
+
+    <!-- 开始卡片 -->
+    <section id="start-card" class="card center" hidden>
+      <h1>隔空写字</h1>
+      <p class="lead">对着摄像头，用食指在空气里写字。捏合落笔、松开提笔，张开手掌换工具，手背向右横扫让字迹像雪花一样飘散。</p>
+      <div class="card-actions">
+        <button id="btn-begin" class="wide primary" type="button">开启摄像头</button>
+        <button id="btn-demo" class="wide" type="button">先看演示（不需要摄像头）</button>
+      </div>
+      <p class="fine">手机上请用 Safari / Chrome 打开 https 地址（浏览器只允许 HTTPS 或 localhost 用摄像头）；电脑上也可以用这个页面的 http://localhost:8000/ 。第一次打开要下载约 17 MB 的模型，之后会缓存。横屏书写更舒服，手离摄像头 40–80 cm 最稳。</p>
+    </section>
+
+    <!-- 手势说明卡片 -->
+    <section id="help-card" class="card center" hidden>
+      <h1>手势速查</h1>
+      <ul class="gestures">
+        <li><b>捏合</b><span>拇指与食指捏在一起 = 落笔，松开 = 提笔，笔迹留在屏幕上</span></li>
+        <li><b>停顿</b><span>写完一个字停 1.1 秒，自动分字并识别</span></li>
+        <li><b>张开手掌</b><span>第一次张开 = 弹出工具面板，第二次张开 = 收起面板</span></li>
+        <li><b>食指悬停</b><span>指尖指到某个格子停 0.7 秒就选中它（也可以直接用鼠标点）</span></li>
+        <li><b>缩放</b><span>面板里选「缩放」，拇指与食指开合放大缩小，手掌移动平移画面</span></li>
+        <li><b>手背向右横扫</b><span>手背朝镜头向右一挥，笔迹碎成雪花飘落消散</span></li>
+      </ul>
+      <div class="card-actions">
+        <button id="btn-help-close" class="wide" type="button">知道了</button>
+      </div>
+      <p class="fine keys">快捷键：空格 开始/暂停 · Z 撤销 · X 清空 · M 镜像 · F 全屏 · H 说明 · P 面板</p>
+      <p class="fine touch-only">手机小贴士：横屏拿手机、手离镜头 40–80 cm；没有摄像头也能用「演示模式」或直接用手指在屏幕上写。</p>
+    </section>
+
+    <!-- 错误卡片 -->
+    <section id="error" class="card center error" hidden>
+      <h1 id="error-title">出错了</h1>
+      <p class="lead" id="error-text"></p>
+      <pre id="error-detail" hidden></pre>
+      <div class="card-actions">
+        <button id="btn-error-retry" class="wide primary" type="button">重试</button>
+        <button id="btn-error-demo" class="wide" type="button">改用演示模式</button>
+        <button id="btn-error-close" class="wide" type="button">关闭</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- 脚本错误落在这里：真机上能直接看到，headless 自检也靠它取证 -->
+  <pre id="out" hidden></pre>
+  <script>
+    (function () {
+      var out = document.getElementById('out');
+      function log(line) {
+        out.hidden = false;
+        out.textContent += (out.textContent ? '\n' : '') + line;
+      }
+      window.addEventListener('error', function (ev) {
+        var where = ev.filename ? ' @' + ev.filename + ':' + ev.lineno : '';
+        log('ERROR ' + (ev.message || ev.error) + where + (ev.error && ev.error.stack ? '\n' + ev.error.stack : ''));
+      });
+      window.addEventListener('unhandledrejection', function (ev) {
+        var reason = ev.reason || '';
+        log('REJECT ' + (reason && reason.stack ? reason.stack : reason));
+      });
+    })();
+  </script>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>
