@@ -32,6 +32,35 @@ export const DEFAULT_CONFIG = {
   characterGapMs: 1100,
   doublePinchMs: 420,
   maxStrokesPerCharacter: 8,
+  /*
+   * 分字精修（m02798）：光看停顿一个信号不够。
+   * 慢写的多笔字（H / A / 我）会被 1.1 秒切成一笔一个字，快写的两个字又会被并起来。
+   * 补两个信号：提笔后手有没有走开、这一笔落得离上一字远不远；组合规则见 ink.js。
+   */
+  resumeGapMs: 2600,
+  /*
+   * 提笔后手平移多远算"人已经离开这块书写区"：跟着字的大小缩放（1.25 个字），
+   * 但至少 0.22 个画面。这个阈值管的是"挪到别处继续写"，不是"换下一个字"——
+   * 换字主要靠停顿（gapMs）和"起笔离上一笔很远"（near 判定），因为一个字的
+   * 第 2、3 笔同样要抬笔挪手，位移和换字几乎一样大，靠位移分不开。
+   */
+  travelBreakFrac: 1.25,
+  travelBreakDistance: 0.22,
+  resumeMarginMin: 0.05,
+  resumeMarginFrac: 0.55,
+  // 提笔迟滞：捏合松开要稳定保持这么久才收笔（消掉单帧抖动切笔）
+  penUpHoldMs: 90,
+  penUpCancel: 0.5,
+  /*
+   * 追踪跳变的"隐含速度"闸：单帧位移只要有 glitchMinDistance 这么大，而且比这一笔
+   * 自己的近期速度（EMA）快 glitchSpeedFactor 倍以上，就当 landmark 甩了、直接丢样。
+   * glitchMinSpeed 是下限，别低于正常快写的速度 —— 正常快写每帧 0.03~0.05（2~4 单位/秒），
+   * 取 6 单位/秒留足余量；设成 1.2 会把正常笔迹也丢掉。
+   */
+  glitchSpeedFactor: 4.5,
+  glitchMinSpeed: 6,
+  glitchMinDistance: 0.05,
+  glitchMaxGapMs: 320,
   // 面板
   dwellMs: 700,
   // 张开手掌开面板：累计满足 palm 的时长（允许抖动间隙），不再是"连续若干帧"
@@ -197,6 +226,28 @@ export function createAirWriteEngine(options = {}) {
     maxExtent: 0.9,
     maxSamplesPerStroke: 1400,
     maxCharacters: 60,
+    // 分字的多信号配置（m02798）：停顿 + 提笔后手走开多远 + 落笔是否在上一字旁边。
+    resumeGapMs: cfg.resumeGapMs,
+    travelBreakFrac: cfg.travelBreakFrac,
+    travelBreakDistance: cfg.travelBreakDistance,
+    resumeMarginMin: cfg.resumeMarginMin,
+    resumeMarginFrac: cfg.resumeMarginFrac,
+    glitchSpeedFactor: cfg.glitchSpeedFactor,
+    glitchMinSpeed: cfg.glitchMinSpeed,
+    glitchMinDistance: cfg.glitchMinDistance,
+    glitchMaxGapMs: cfg.glitchMaxGapMs,
+  });
+
+  /*
+   * 分字关闭的唯一出口。ink 每关闭一个字符就同步发 'character'（无论关闭发生在
+   * tick 里还是 begin 里），引擎在这里把它接管成自己的字符；'revoke' 是 ink 发现
+   * 自己过早交字、把笔迹收回继续合并时发出的，用来把那个"半个字"撤掉。
+   */
+  ink.on('character', (character) => {
+    adoptInkCharacter(character);
+  });
+  ink.on('revoke', (character) => {
+    revokeCharacter(character.strokes);
   });
 
   /* ---------------- 状态 ---------------- */
@@ -240,7 +291,6 @@ export function createAirWriteEngine(options = {}) {
   let charactersSeq = 0;
   let lastPenDownAt = 0;
   let lastCloseAt = 0;
-  let closedSinceSnapshot = false;
   let closedReason = 'gap';
   let inkVersion = 1;
   let pixelScale = 1000;
@@ -391,6 +441,8 @@ export function createAirWriteEngine(options = {}) {
       id: nextCharacterId++,
       seq: charactersSeq++,
       strokes,
+      // 笔迹 id 快照：分字撤回时靠它把"这一个字"从 characters 里精确定位出来。
+      strokeIds: strokes.map((s) => s.id),
       bounds,
       text: '',
       confidence: 0,
@@ -432,28 +484,26 @@ export function createAirWriteEngine(options = {}) {
   }
 
   /**
-   * 分字收尾。ink.js 会在"停顿 / 手动 break"时关闭字符并给出 pending 数量，
-   * 这里按 id 把这一段笔迹取出来交给识别器，保证每一笔只被识别一次。
+   * 分字收尾：把 ink 关闭的一个字符接管成引擎字符。
+   *
+   * 分字是 ink 的职责（它同时看得见停顿多久、提笔后手走开多远、这一笔落在哪），
+   * 关闭时机既可能出现在每帧的 tick() 里，也可能出现在 begin() 内部（新一笔落下的
+   * 瞬间）。所以这里订阅 ink 的 'character' 事件，而不是用"上一帧 pending 数量"
+   * 去猜：猜法会漏掉 begin() 里发生的关闭，那些笔迹就既不在 pending 里、也没被交给
+   * 识别器，屏幕上看着像"字写丢了"。
    */
-  function closeCharacter(reason, closedCount) {
-    if (!closedCount) return null;
-    const strokes = [];
-    for (const mark of ink.marks) {
+  function adoptInkCharacter(ch) {
+    if (!ch || !ch.strokes || !ch.strokes.length) return null;
+    const fresh = [];
+    for (const mark of ch.strokes) {
       if (mark.id <= assignedThroughId) continue;
-      strokes.push({ id: mark.id, color: mark.color, width: mark.width, points: mark.points });
+      fresh.push({ id: mark.id, color: mark.color, width: mark.width, points: mark.points });
     }
-    const fresh = strokes.slice(-closedCount);
     if (!fresh.length) return null;
     assignedThroughId = fresh[fresh.length - 1].id;
     lastCloseAt = nowImpl();
-    closedReason = reason;
+    closedReason = ch.reason || 'gap';
     return buildCharacter(fresh);
-  }
-
-  function snapshotClosedCharacter() {
-    if (!closedSinceSnapshot) return;
-    closedSinceSnapshot = false;
-    closeCharacter(closedReason, closedCount);
   }
 
   /**
@@ -467,17 +517,43 @@ export function createAirWriteEngine(options = {}) {
    */
   function breakPendingCharacter(reason) {
     if (ink.live) ink.end(nowImpl());
-    const pendingCount = ink.pending.length;
+    // ink.breakCharacter 会同步发出 'character' 事件，由 adoptInkCharacter 接管。
     const closed = ink.breakCharacter(reason);
     if (!closed) return false;
     lastCloseAt = nowImpl();
     refreshSnapshot(nowImpl());
-    closeCharacter(reason, pendingCount);
     return true;
   }
 
   let assignedThroughId = 0;
-  let closedCount = 0;
+
+  /**
+   * 撤回一个已经交出去的字（ink 决定"其实还是同一个字"时触发）。
+   *
+   * 分字为了及时出字，会在 1.1 秒停顿处先把字交出去识别；但用户可能只是在慢慢
+   * 写多笔字。ink 发现下一笔就落在旁边、手也没走开时，会把那些笔迹收回 pending
+   * 并发出 revoke —— 这里必须把对应的字符从 characters 里摘掉，否则画面上会留下
+   * 一个识别错误的"半个字"，同时把 assignedThroughId 回退到前一个字，
+   * 保证合并后的字能整段重新识别一次。
+   */
+  function revokeCharacter(strokes) {
+    if (!strokes || !strokes.length) return false;
+    const ids = strokes.map((s) => s.id);
+    const index = characters.findIndex(
+      (c) => c.strokeIds && c.strokeIds.length === ids.length && c.strokeIds[0] === ids[0],
+    );
+    if (index < 0) return false;
+    characters.splice(index, 1);
+    assignedThroughId = 0;
+    for (const c of characters) {
+      const last = c.strokeIds && c.strokeIds.length ? c.strokeIds[c.strokeIds.length - 1] : 0;
+      if (last > assignedThroughId) assignedThroughId = last;
+    }
+    inkVersion += 1;
+    refreshSnapshot(nowImpl());
+    emit('revoke', { ids });
+    return true;
+  }
 
   /* ---------------- 面板 ---------------- */
 
@@ -883,16 +959,9 @@ export function createAirWriteEngine(options = {}) {
     const mirrored = options.mirror !== false;
     const now = Number.isFinite(nowIn) ? nowIn : nowImpl();
     ensurePanel();
-    // ink.js 负责"停顿 => 关闭字符"，关闭的瞬间它会把 pending 清空，
-    // 这里用"上一帧的 pending 数"还原这次关闭包含了几笔。
-    const pendingBefore = ink.pending.length;
+    // ink.js 负责"什么时候算写完一个字"（停顿 / 走开 / 手动分字），关闭时它同步
+    // 发出 'character' 事件，由 adoptInkCharacter 接管成引擎字符，这里只管推它一帧。
     ink.tick(now);
-    if (!ink.pending.length && pendingBefore > 0) {
-      closedCount = pendingBefore;
-      closedReason = 'gap';
-      closedSinceSnapshot = true;
-    }
-    snapshotClosedCharacter();
     updateSnow(now);
     if (!snow.length && snowDeadline && now > snowDeadline) snowDeadline = 0;
 
@@ -920,6 +989,8 @@ export function createAirWriteEngine(options = {}) {
           dissolveSince: 0,
           lastSeenAt: now,
           lastRawPinch: metrics.pinch,
+          /** 提笔迟滞：捏合值开始持续超过 pinchEnd 的时刻（0 = 没在提笔）。 */
+          penUpSince: 0,
         };
         handState.set(key, hs);
       }
@@ -1098,17 +1169,33 @@ export function createAirWriteEngine(options = {}) {
        */
       const gripped = pen.metrics.kind === 'fist' || pen.metrics.curled;
       if (state.drawing) {
-        if (pinch >= cfg.pinchEnd) endStroke(now);
-        else moveStroke(mid, now);
+        /*
+         * 提笔迟滞：捏合值要"稳定"超过 pinchEnd 这么久才算真提笔。
+         * 单帧的 landmark 抖动会把 smoothedPinch 顶过 0.6 一下，原来立刻 endStroke，
+         * 一笔就被切成两笔、字也跟着碎；真松开手时捏合值会一直高，90ms 内就收笔。
+         */
+        if (pinch >= cfg.pinchEnd) {
+          if (!hs.penUpSince) hs.penUpSince = now;
+          else if (now - hs.penUpSince >= cfg.penUpHoldMs) endStroke(now);
+        } else {
+          hs.penUpSince = 0;
+          moveStroke(mid, now);
+        }
       } else if (pinch <= cfg.pinchStart && !selection.active && !gripped) {
         // 双击分字：两次落笔间隔很短 => 手动换字
         if (now - lastPenDownAt < cfg.doublePinchMs && ink.pending.length) {
           breakPendingCharacter('manual');
         }
+        hs.penUpSince = 0;
         startStroke(pen.metrics, now);
       } else if (pinch <= cfg.pinchStart) {
         state.cursor.pinch = pinch;
       }
+      /*
+       * 提笔期间每帧喂一次位置：分字要靠"手走开多远"来判断是不是换了字。
+       * 只在没写的时候累积，写的时候位移属于笔画本身。
+       */
+      if (!state.drawing) ink.hover(mid.x, mid.y);
     } else if (state.drawing) {
       /*
        * 这一帧没看见任何手：刚还在写就先别收笔 —— 检测闪断（丢一两帧）会把一笔
@@ -1375,11 +1462,17 @@ export function createAirWriteEngine(options = {}) {
     },
 
     stats() {
+      const inkStats = ink.stats();
       return {
         strokes: inkSnapshot.length,
         points: inkSnapshot.reduce((sum, s) => sum + s.points.length, 0),
         pendingStrokes: ink.pending.length,
         characters: characters.length,
+        /* 分字诊断（m02798）：被当成追踪跳变丢掉的采样、被撤回合并的字符数、
+           提笔后手平移了多远（0~1 归一化）。 */
+        dropped: inkStats.dropped,
+        revoked: inkStats.revoked,
+        travel: inkStats.travel,
         snow: snow.length,
         tool: state.tool,
         zoom: state.zoom.level,
