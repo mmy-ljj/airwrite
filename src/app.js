@@ -88,8 +88,6 @@ const renderer = createAirWriteRenderer({
   inkCanvas: dom.ink,
   mapper,
   engine,
-  // 手机底部被工具栏占满：画布左下角那行"笔迹 N · 字 N"会和工具栏重叠，关掉。
-  stats: !IS_MOBILE,
 });
 
 let rig = null;
@@ -682,9 +680,13 @@ function qaFinish() {
       ['缩放初始为 1', Math.abs(snap.zoom - 1) < 1e-6],
       ['没有弹出错误卡片', snap.error === false],
       ['状态栏进入运行态', /运行中|演示|选择/.test(snap.status)],
-      ['画布上真的画出了东西', snap.lit > 20],
       ['画布没有被 CSS 翻转（中文才不会镜像）', getComputedStyle(dom.overlay).transform === 'none'],
     ];
+    // 只有演示模式一定会落笔（合成手在写字）；真摄像头前面没人手时画布当然是空的，
+    // 这一条不该拿"有没有墨"去卡它（以前是靠左下角那行统计文字凑够像素才过的）。
+    if (snap.source === 'demo') {
+      checks.push(['画布上真的画出了东西', snap.lit > 20]);
+    }
   }
   if (clicked) checks.push(['点面板上的“缩放”真的选中了', clicked.ok, clicked.detail]);
   if (snap.source === 'camera' && !qaExpectError) {

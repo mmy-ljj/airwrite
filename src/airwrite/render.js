@@ -100,11 +100,6 @@ export function createAirWriteRenderer({
    * 肉眼看不出差别 —— 所以默认压到 2。
    */
   maxDpr = 2,
-  /**
-   * 是否在画布左下角画"笔迹 N · 字 N"。手机底部已经被 DOM 工具栏占住，
-   * 这行字会和工具栏/hint 叠在一起（竖屏实测重叠），所以手机上关掉它。
-   */
-  stats = true,
 } = {}) {
   const ctx = canvas.getContext('2d');
   const inkCtx = inkCanvas ? inkCanvas.getContext('2d') : ctx;
@@ -446,22 +441,6 @@ export function createAirWriteRenderer({
     ctx.restore();
 
     const rects = engine.state.selectionMode ? drawPanel(ctx, now) : [];
-
-    ctx.save();
-    // 窄屏（手机竖屏）底部已经被 DOM 工具栏占住，这行统计会和提示文字叠在一起：
-    // 宽度够才画，比只看 IS_MOBILE 更稳（平板/分屏/窄窗都不重叠）。
-    if (stats && width >= 560) {
-      ctx.fillStyle = 'rgba(220, 239, 255, 0.72)';
-      ctx.font = `500 ${13 * ratio}px "Segoe UI", "Microsoft YaHei", system-ui, sans-serif`;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'bottom';
-      const chars = engine.characters.map((c) => (c.ready ? c.text || '?' : '…')).join(' ');
-      const label = `笔迹 ${engine.strokes.length} · 字 ${engine.characters.length}${chars ? ` · ${chars}` : ''}${
-        engine.isSnowing ? ` · 飘散 ${engine.snowParticles.length}` : ''
-      }`;
-      ctx.fillText(label, 16 * ratio, height - 14 * ratio);
-    }
-    ctx.restore();
 
     return { rects, mapper, width, height, ratio };
   }
