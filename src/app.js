@@ -69,21 +69,10 @@ const state = {
 
 /* ------------------------------------------------------------- 三件套 --- */
 
-const engine = createAirWriteEngine({ recognizer: createRecognizer() });
-const mapper = new ViewMapper();
-const renderer = createAirWriteRenderer({
-  canvas: dom.overlay,
-  inkCanvas: dom.ink,
-  mapper,
-  engine,
-});
-
-let rig = null;
-let viewport = { width: 0, height: 0 };
-
 /**
  * 移动端判定：粗指针（触屏）或手机 UA。用来做几件确定性的取舍 ——
  * 只追踪一只手、推理限到 30fps、跳过 iOS 不支持的全屏、申请屏幕常亮。
+ * 必须在 renderer 之前：渲染器的 stats 开关要用它。
  */
 const IS_TOUCH = typeof matchMedia === 'function' && matchMedia('(pointer: coarse)').matches;
 const IS_MOBILE =
@@ -91,6 +80,21 @@ const IS_MOBILE =
 const IS_IOS =
   /iPad|iPhone|iPod/.test(navigator.userAgent || '') ||
   (navigator.platform === 'MacIntel' && (navigator.maxTouchPoints || 0) > 1);
+
+const engine = createAirWriteEngine({ recognizer: createRecognizer() });
+const mapper = new ViewMapper();
+const renderer = createAirWriteRenderer({
+  canvas: dom.overlay,
+  inkCanvas: dom.ink,
+  mapper,
+  engine,
+  // 手机底部被工具栏占满：画布左下角那行"笔迹 N · 字 N"会和工具栏重叠，关掉。
+  stats: !IS_MOBILE,
+});
+
+let rig = null;
+let viewport = { width: 0, height: 0 };
+
 
 const demoFrames = createGlyphDemoFrames({ keys: ['A', '5', 'H', 'I'] });
 
